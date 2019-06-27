@@ -148,7 +148,7 @@ def find_mapping(v1, v2, vmap=None, bordercontrol=(0, 0), show_result=False):
 
     #cut similarly-placed-same-length pieces from the two signal and find their phase shifts,
     #fractions = [1,3,x,x,x...]
-    fractions = np.r_[1, 3, 5, np.linspace(0, 20, 25) + np.random.rand(20)*5]
+    fractions = np.r_[1, 3, 5, np.linspace(0, 20, 25) + np.random.rand(25)*5]
     
     for frac in fractions:
         
