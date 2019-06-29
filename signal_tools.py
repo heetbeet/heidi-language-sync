@@ -12,6 +12,7 @@ from scipy import signal
 from scipy import interpolate
 import misc
 
+from slice_maker import slice_maker
 
 #Generate some filenames to be used throughout the program
 def generate_filenames(discard_video,     #eg. Afrikaans LQ
@@ -146,40 +147,19 @@ def find_mapping(v1, v2, vmap=None, bordercontrol=(0, 0), show_result=False):
     def to_vmap(dmap):
         return dmap+np.arange(len(dmap))
 
-    #cut similarly-placed-same-length pieces from the two signal and find their phase shifts,
-    #fractions = [1,3,x,x,x...]
-    fractions = np.r_[1, 3, 5, np.linspace(0, 20, 25) + np.random.rand(25)*5]
-    
-    for frac in fractions:
+    #Cut signal into pieces and find each piece's phase shifts,
+    dmap_old = dmap
+    for nwindows in np.r_[1, 3, 4, np.linspace(0, 20, 25) + np.random.rand(25)*5]:
         
-        loverlap = int(np.round(uselen/frac/2))
-        
-        # Overlapping windows: overlap by little less than half of window
-        # Window length varies by 10%
+        # Overlapping windows: overlap by roughly half the window size
         # [win 1 ]
         #     [win 2 ]
-        #         [win 3 ]
-        #             [win 4 ]
-        winstarts=[];
-        nxt = lii
-        while nxt < rii-loverlap*1.5:
-            winstarts.append(int(nxt))
-            nxt = nxt + round((loverlap*(1+np.random.rand()*0.1)))
-
-        winends = [i+loverlap for i in winstarts[1:]]+[rii]
-
-        
-        #  1 |          ___|  (Overlap damping
-        #    |       ,-`   |   cosine curve)
-        #    |      /      |
-        #  0 |___,-`       |
-        #    0 - - - - - loverlap
-        curve = np.cos(np.linspace(np.pi, 0, loverlap))*0.5+0.5
-
-        
-        dmap_old = dmap
-        for ii, (i0, i1) in enumerate(zip(winstarts, winends)):
-            is_left, is_right = (ii==0, ii==len(winends)-1)
+        #         [win 3 ] ...
+        for (i0, i1), p in slice_maker(uselen, #total length 
+                                       nwindows=nwindows, #into how many windows?
+                                       overlap_frac=0.5,  #overlap with neighbour
+                                       expand_frac=0.15): #windows may enlarge by 15%
+            i0, i1 = (i0+lii, i1+lii)
             
             sub1 = blackmanned(v1[i0:i1])
             try:
@@ -190,18 +170,11 @@ def find_mapping(v1, v2, vmap=None, bordercontrol=(0, 0), show_result=False):
             
             delay, _ = fft.phasedelay(sub1, sub2, subsample_rate=50)
             
-            #only allow a delay of 5% overlap size or less
-            if np.abs(delay) > loverlap*0.05:
+            #only allow the delay if shifted 5% of snippet or less
+            if np.abs(delay) > (i1-i0)*0.05:
                 continue
 
-            #add delay to dmap, and let it decay at at overlaps
-            #slope overlaps:  _      __       __    ___
-            #                / \ or    \ or  /   or
-            slopes = np.ones(len(sub1))*1.0
-            slopes[:loverlap ] *= curve       if not is_left  else 1
-            slopes[-loverlap:] *= curve[::-1] if not is_right else 1
-
-            dmap[i0:i1] += (delay)*slopes
+            dmap[i0:i1] += (delay)*p.dampwin
 
         dmap[:lii] = dmap[lii]   # drag into the lhs border
         dmap[rii:] = dmap[rii-1] # drag into the rhs border
@@ -243,6 +216,19 @@ def fix_dmap_warps(dmap,
             
             frame = np.sum(np.load(fnames.discard_frames)[mid], axis=2)
             
+            misc.scaled_audio_write(fnames.tmp+'/'+fnames.id+'--%5d_to_%5d_l.wav'%(framei, framej),
+                                   freq,
+                                   xl[int(framei*freq/fps):int(mid*freq/fps)])
+            misc.scaled_audio_write(fnames.tmp+'/'+fnames.id+'--%5d_to_%5d_r.wav'%(framei, framej),
+                                   freq,
+                                   xl[int(mid*freq/fps):int(framej*freq/fps)])
+
+
+            plt.figure(figsize=(12,2))
+            plt.plot()
+
+            plt.xlabel(os.path.split(fnames.desired_video)[-1])
+            
             return mid
     
         
@@ -255,9 +241,7 @@ def fix_dmap_warps(dmap,
     #derivative: slight blur to get smooth speed estimate
     speed = (gaussian_filter(dmap, sigma=100)[1:]-     
              gaussian_filter(dmap, sigma=100)[:-1])*24 #(??) don't know what units
-    
-    plt.figure(figsize=(12,4))
-    plt.plot(speed)
+
     
     toofast = np.abs(speed)>0.4
    
@@ -281,13 +265,15 @@ def fix_dmap_warps(dmap,
 
     #beginning and endpoints for these splits
     splits = [(None,0,1)] + splits + [(n-1,n,None)]
-
-    for i in splits: plt.plot(list(i), [0]*len(i), 'o')
     
+    plt.figure(figsize=(12,4))
+    plt.plot(speed)
+    for i in splits: plt.plot(list(i), [0]*len(i), 'o')
+        
+    print('splitpoints:', splits)
     #Break signal into chunks and smooth out these chunks
     chunks = []
     for (i0,m0,j0), (i1,m1,j1) in zip(splits[:-1], splits[1:]):
-        print((i0,m0,j0), (i1,m1,j1))
         chunk = dmap[m0:m1]
         idx = m0 #shift
         
@@ -314,7 +300,7 @@ def warp_audio(fnames):
     vmap.sec2 = vmap.idx2/fps2
 
     #signal and timestamps for audio 1: we have this audio
-    arr, myfreq = ffmpeg_wrap.read_as_audio(fnames.desired_audio)
+    #arr, myfreq = ffmpeg_wrap.read_as_audio(fnames.desired_audio)
     
     x1l, x1r = np.load(fnames.input_audio).T
     myfreq = ffmpeg_wrap.get_sample_rate(fnames.desired_audio)
@@ -345,33 +331,17 @@ def warp_audio(fnames):
     #upsample to 5x and interpolate the rest of the way
     upx = 1 #too slow, skip this step
     
-    # Too expensive to do at once :(, process as wth pieces
-    wth = len(aud_idx1_new)/30
-    
-    #from-to indices. Let last snippet not be too small
-    pnts = np.arange(0, len(aud_idx1_new), wth, dtype='int')
-    if (len(aud_idx1_new) - pnts[-1]) <= roundint(wth*0.3):
-        pnts = pnts[:-1]
+    # Too expensive to do at once :(, process as wth pieces    
     
     x2l, x2r = (np.zeros(len(aud_idx1_new), dtype='float'),
                 np.zeros(len(aud_idx1_new), dtype='float'))
     
-    for i, (ii, jj) in enumerate(zip(pnts[:-1],
-                                     pnts[1:])):
-        print('Audio snippet %d/%d'%(i+1,len(pnts)-1), end = '', flush=True)
-        
-        #add bleed: 5% left, 5% right
-        bleed = roundint(wth*0.3)
-        ii = ii if ii==pnts[0]  else ii-bleed
-        jj = jj if jj==pnts[-1] else jj+bleed
-        
-
-        #  1 |          ___|  (Overlap damping
-        #    |       ,-`   |   cosine curve)
-        #    |      /      |
-        #  0 |___,-`       |
-        #    0 - - - - - bleed  
-        curve = np.cos(np.linspace(np.pi, 0, bleed))*0.5+0.5
+    
+    print('Audio snippet', end='', flush=True)        
+    for (ii, jj), p in slice_maker(len(aud_idx1_new),  #total length 
+                                   wsize=48000*30   ,  #into 30 second snippets
+                                   overlap_frac=0.05,  #overlap with neighbour
+                                   endsize_frac=0.15): #endsize at least 15% wsize
         
         i1, j1 = (roundint(np.min(aud_idx1_new[ii:jj])),
                   roundint(np.max(aud_idx1_new[ii:jj])))
@@ -380,30 +350,26 @@ def warp_audio(fnames):
         lsnip, rsnip = np.zeros(powlen, dtype='float'), np.zeros(powlen, dtype='float')
         lsnip[:j1-i1] = x1l[i1:j1]
         rsnip[:j1-i1] = x1r[i1:j1]
+        
+        if len(rsnip):
+            print(('%d'%np.ceil((p.i+1)*100/p.nwindows)), end='% ', flush=True)
+
+            lsnip, rsnip = [
+                interpolate.interp1d(np.arange(len(snip))/upx  , # x: gotcha upx
+                                     snip                      , # y: upsample upx times
+                                     kind='quadratic'          ,
+                                     fill_value=(0,0)          ,
+                                     bounds_error=False)( aud_idx1_new[ii:jj]-i1 ) # newx: gotcha i1 -> 0
+                for snip in (lsnip, rsnip)]
+
+            for snip in lsnip, rsnip:
+                snip*=p.dampwin
+
+            #note that overlap windows sum to one :)
+            x2l[ii:jj] += lsnip 
+            x2r[ii:jj] += rsnip 
     
-        #print('... fft upsample', end = '', flush=True)
-        #lsnip = signal.resample(lsnip, len(lsnip)*upx)
-        #rsnip = signal.resample(rsnip, len(rsnip)*upx)
-        
-        print('... quadratic interp', end = '', flush=True)
-        lsnip, rsnip = [
-            interpolate.interp1d(np.arange(len(snip))/upx  , # x: gotcha upx
-                                 snip                      , # y: upsample upx times
-                                 kind='quadratic'          ,
-                                 fill_value=(0,0)          ,
-                                 bounds_error=False)( aud_idx1_new[ii:jj]-i1 ) # newx: gotcha i1 -> 0
-            for snip in (lsnip, rsnip)]
-        
-        for snip in lsnip, rsnip:
-            if ii!=pnts[0] : snip[:bleed ]*=curve
-            if jj!=pnts[-1]: snip[-bleed:]*=curve[::-1]
-        
-        x2l[ii:jj] += lsnip #note the overlap: curve + curve[::-1] == 1
-        x2r[ii:jj] += rsnip #note the overlap: curve + curve[::-1] == 1
-        
-        print()
-    
-    print('Write the audio to '+os.path.abspath(fnames.output_wav))
+    print('Write the audio to '+os.path.abspath(fnames.output_wav), flush=True)
     misc.scaled_audio_write(fnames.output_wav, myfreq, x2l, x2r)
 
     

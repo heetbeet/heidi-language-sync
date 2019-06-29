@@ -101,7 +101,10 @@ class dotdict(dict):
     def __init__(self, **kwds):
         self.update(kwds)
         self.__dict__ = self
+ddict = dotdict
 
+def roundi(val):
+    return np.round(val).astype('int')
 
 def add_file_posttext(filename, posttext):
     return os.path.splitext(filename)[0] + posttext + os.path.splitext(filename)[1]
